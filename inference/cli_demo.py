@@ -22,6 +22,8 @@ Additional options are available to specify the model path, guidance scale, numb
 
 import argparse
 import logging
+import sys
+from pathlib import Path
 from typing import Literal, Optional
 
 import torch
@@ -33,6 +35,16 @@ from diffusers import (
     CogVideoXVideoToVideoPipeline,
 )
 from diffusers.utils import export_to_video, load_image, load_video
+
+# Add rabbitvideo to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+try:
+    from rabbitvideo import enable_rabbitvideo
+    RABBITVIDEO_AVAILABLE = True
+except ImportError:
+    RABBITVIDEO_AVAILABLE = False
+    logging.warning("RabbitVideo not available. Install to use --use_rabbitvideo flag.")
 
 
 logging.basicConfig(level=logging.INFO)
@@ -66,6 +78,9 @@ def generate_video(
     generate_type: str = Literal["t2v", "i2v", "v2v"],  # i2v: image to video, v2v: video to video
     seed: int = 42,
     fps: int = 16,
+    use_rabbitvideo: bool = False,
+    max_gpu_blocks: int = 5,
+    enable_kv_cache: bool = False,
 ):
     """
     Generates a video based on the given prompt and saves it to the specified path.
@@ -86,6 +101,9 @@ def generate_video(
     - generate_type (str): The type of video generation (e.g., 't2v', 'i2v', 'v2v').·
     - seed (int): The seed for reproducibility.
     - fps (int): The frames per second for the generated video.
+    - use_rabbitvideo (bool): Use RabbitVideo memory optimization instead of sequential CPU offload.
+    - max_gpu_blocks (int): Maximum transformer blocks to keep on GPU (for RabbitVideo, default: 5).
+    - enable_kv_cache (bool): Enable experimental KV cache optimization (for RabbitVideo, default: False).
     """
 
     # 1.  Load the pre-trained CogVideoX pipeline with the specified precision (bfloat16).
@@ -146,8 +164,31 @@ def generate_video(
     # and enable to("cuda")
     # pipe.to("cuda")
 
-    # pipe.enable_model_cpu_offload()
-    pipe.enable_sequential_cpu_offload()
+    # You can use RabbitVideo for better memory efficiency with less overhead:
+    # python cli_demo.py --prompt "..." --use_rabbitvideo --max_gpu_blocks 5
+
+    if use_rabbitvideo:
+        if not RABBITVIDEO_AVAILABLE:
+            raise ImportError(
+                "RabbitVideo is not available. Please check that rabbitvideo/ directory exists."
+            )
+
+        logging.info("Using RabbitVideo memory optimization")
+        pipe.to("cuda")
+        enable_rabbitvideo(
+            pipe,
+            max_gpu_blocks=max_gpu_blocks,
+            initial_gpu_blocks=max_gpu_blocks,
+            enable_kv_cache=enable_kv_cache,
+            offload_text_encoder=True,
+            manage_vae=True,
+            verbose=True,
+        )
+    else:
+        # Default: use sequential CPU offload
+        # pipe.enable_model_cpu_offload()
+        pipe.enable_sequential_cpu_offload()
+
     pipe.vae.enable_slicing()
     pipe.vae.enable_tiling()
 
@@ -248,6 +289,22 @@ if __name__ == "__main__":
         "--dtype", type=str, default="bfloat16", help="The data type for computation"
     )
     parser.add_argument("--seed", type=int, default=42, help="The seed for reproducibility")
+    parser.add_argument(
+        "--use_rabbitvideo",
+        action="store_true",
+        help="Use RabbitVideo memory optimization (better than sequential CPU offload)",
+    )
+    parser.add_argument(
+        "--max_gpu_blocks",
+        type=int,
+        default=5,
+        help="Max transformer blocks on GPU for RabbitVideo (5 for 24GB, 3 for 12GB)",
+    )
+    parser.add_argument(
+        "--enable_kv_cache",
+        action="store_true",
+        help="Enable experimental KV cache optimization for RabbitVideo",
+    )
 
     args = parser.parse_args()
     dtype = torch.float16 if args.dtype == "float16" else torch.bfloat16
@@ -268,4 +325,7 @@ if __name__ == "__main__":
         generate_type=args.generate_type,
         seed=args.seed,
         fps=args.fps,
+        use_rabbitvideo=args.use_rabbitvideo,
+        max_gpu_blocks=args.max_gpu_blocks,
+        enable_kv_cache=args.enable_kv_cache,
     )
