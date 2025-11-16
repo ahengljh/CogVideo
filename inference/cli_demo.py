@@ -40,10 +40,12 @@ from diffusers.utils import export_to_video, load_image, load_video
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 try:
-    from rabbitvideo import enable_rabbitvideo
+    from rabbitvideo import enable_rabbitvideo, enable_rabbitvideo_v2
     RABBITVIDEO_AVAILABLE = True
+    RABBITVIDEO_V2_AVAILABLE = True
 except ImportError:
     RABBITVIDEO_AVAILABLE = False
+    RABBITVIDEO_V2_AVAILABLE = False
     logging.warning("RabbitVideo not available. Install to use --use_rabbitvideo flag.")
 
 
@@ -79,8 +81,12 @@ def generate_video(
     seed: int = 42,
     fps: int = 16,
     use_rabbitvideo: bool = False,
+    rabbitvideo_version: str = "v2",
     max_gpu_blocks: int = 5,
     enable_kv_cache: bool = False,
+    enable_prefetch: bool = True,
+    enable_smart_pinning: bool = True,
+    enable_batching: bool = True,
 ):
     """
     Generates a video based on the given prompt and saves it to the specified path.
@@ -102,8 +108,12 @@ def generate_video(
     - seed (int): The seed for reproducibility.
     - fps (int): The frames per second for the generated video.
     - use_rabbitvideo (bool): Use RabbitVideo memory optimization instead of sequential CPU offload.
+    - rabbitvideo_version (str): RabbitVideo version: 'v1' or 'v2' (default: 'v2').
     - max_gpu_blocks (int): Maximum transformer blocks to keep on GPU (for RabbitVideo, default: 5).
     - enable_kv_cache (bool): Enable experimental KV cache optimization (for RabbitVideo, default: False).
+    - enable_prefetch (bool): Enable async prefetching (RabbitVideo v2 only, default: True).
+    - enable_smart_pinning (bool): Enable smart block pinning (RabbitVideo v2 only, default: True).
+    - enable_batching (bool): Enable batched transfers (RabbitVideo v2 only, default: True).
     """
 
     # 1.  Load the pre-trained CogVideoX pipeline with the specified precision (bfloat16).
@@ -164,8 +174,9 @@ def generate_video(
     # and enable to("cuda")
     # pipe.to("cuda")
 
-    # You can use RabbitVideo for better memory efficiency with less overhead:
-    # python cli_demo.py --prompt "..." --use_rabbitvideo --max_gpu_blocks 5
+    # You can use RabbitVideo for better memory efficiency:
+    # V2 (recommended): python cli_demo.py --prompt "..." --use_rabbitvideo --rabbitvideo_version v2
+    # V1 (legacy): python cli_demo.py --prompt "..." --use_rabbitvideo --rabbitvideo_version v1
 
     if use_rabbitvideo:
         if not RABBITVIDEO_AVAILABLE:
@@ -173,17 +184,36 @@ def generate_video(
                 "RabbitVideo is not available. Please check that rabbitvideo/ directory exists."
             )
 
-        logging.info("Using RabbitVideo memory optimization")
         pipe.to("cuda")
-        enable_rabbitvideo(
-            pipe,
-            max_gpu_blocks=max_gpu_blocks,
-            initial_gpu_blocks=max_gpu_blocks,
-            enable_kv_cache=enable_kv_cache,
-            offload_text_encoder=True,
-            manage_vae=True,
-            verbose=True,
-        )
+
+        if rabbitvideo_version == "v2":
+            if not RABBITVIDEO_V2_AVAILABLE:
+                raise ImportError("RabbitVideo v2 not available. Use --rabbitvideo_version v1")
+
+            logging.info("Using RabbitVideo v2.0 memory optimization")
+            enable_rabbitvideo_v2(
+                pipe,
+                max_gpu_blocks=max_gpu_blocks,
+                initial_gpu_blocks=max_gpu_blocks,
+                enable_kv_cache=enable_kv_cache,
+                enable_prefetch=enable_prefetch,
+                enable_smart_pinning=enable_smart_pinning,
+                enable_batching=enable_batching,
+                offload_text_encoder=True,
+                manage_vae=True,
+                verbose=True,
+            )
+        else:  # v1
+            logging.info("Using RabbitVideo v1.0 memory optimization")
+            enable_rabbitvideo(
+                pipe,
+                max_gpu_blocks=max_gpu_blocks,
+                initial_gpu_blocks=max_gpu_blocks,
+                enable_kv_cache=enable_kv_cache,
+                offload_text_encoder=True,
+                manage_vae=True,
+                verbose=True,
+            )
     else:
         # Default: use sequential CPU offload
         # pipe.enable_model_cpu_offload()
@@ -295,6 +325,13 @@ if __name__ == "__main__":
         help="Use RabbitVideo memory optimization (better than sequential CPU offload)",
     )
     parser.add_argument(
+        "--rabbitvideo_version",
+        type=str,
+        default="v2",
+        choices=["v1", "v2"],
+        help="RabbitVideo version: v1 (legacy) or v2 (recommended, faster)",
+    )
+    parser.add_argument(
         "--max_gpu_blocks",
         type=int,
         default=5,
@@ -304,6 +341,21 @@ if __name__ == "__main__":
         "--enable_kv_cache",
         action="store_true",
         help="Enable experimental KV cache optimization for RabbitVideo",
+    )
+    parser.add_argument(
+        "--disable_prefetch",
+        action="store_true",
+        help="Disable async prefetching (RabbitVideo v2 only)",
+    )
+    parser.add_argument(
+        "--disable_smart_pinning",
+        action="store_true",
+        help="Disable smart block pinning (RabbitVideo v2 only)",
+    )
+    parser.add_argument(
+        "--disable_batching",
+        action="store_true",
+        help="Disable batched transfers (RabbitVideo v2 only)",
     )
 
     args = parser.parse_args()
@@ -326,6 +378,10 @@ if __name__ == "__main__":
         seed=args.seed,
         fps=args.fps,
         use_rabbitvideo=args.use_rabbitvideo,
+        rabbitvideo_version=args.rabbitvideo_version,
         max_gpu_blocks=args.max_gpu_blocks,
         enable_kv_cache=args.enable_kv_cache,
+        enable_prefetch=not args.disable_prefetch,
+        enable_smart_pinning=not args.disable_smart_pinning,
+        enable_batching=not args.disable_batching,
     )
